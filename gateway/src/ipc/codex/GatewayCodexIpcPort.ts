@@ -115,6 +115,7 @@ const DESKTOP_VIEW_NOOP_MESSAGE_TYPES = new Set([
   "app-shell-shortcut-state-changed",
   "avatar-overlay-open-state-request",
   "browser-sidebar-owner-sync",
+  "browser-sidebar-tweaks-enabled-changed",
   "browser-use-turn-route-capture",
   "browser-use-turn-route-release",
   "browser-use-non-local-sites-allowed-changed",
@@ -705,6 +706,21 @@ function makeHandlers({ appServer, broadcast, logger, isClientConnected }) {
         return null;
       case "native-desktop-apps":
         return { apps: [] };
+      case "get-settings":
+        return {
+          values: await desktopState.getSettingValue(null, {
+            readCodexConfig: appServerBridge.readCodexConfig,
+          }),
+        };
+      case "get-setting":
+        return {
+          value: await desktopState.getSettingValue(payload, {
+            readCodexConfig: appServerBridge.readCodexConfig,
+          }),
+        };
+      case "set-setting":
+        await desktopState.setSettingValue(payload, { callAppServer: appServerBridge.callAppServer });
+        return { success: true };
       case "settings:get":
         return desktopState.getSettingValue(payload, { readCodexConfig: appServerBridge.readCodexConfig });
       case "settings:set":

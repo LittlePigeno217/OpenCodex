@@ -1,6 +1,7 @@
 // @ts-nocheck
 export {};
 
+const fs = require("fs");
 const { spawn } = require("child_process");
 const net = require("net");
 const path = require("path");
@@ -79,7 +80,40 @@ function createJsonRpcClient(sendFn) {
 }
 
 function shellQuote(value) {
+  if (process.platform === "win32") {
+    return `"${String(value).replace(/"/g, '\\"')}"`;
+  }
   return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+function isWindowsAppsPath(value) {
+  return process.platform === "win32" && /(^|[\\/])WindowsApps([\\/]|$)/i.test(String(value || ""));
+}
+
+function stageWindowsCodexBinary(binaryPath, logger) {
+  if (!binaryPath || !isWindowsAppsPath(binaryPath)) return binaryPath;
+  const stagedPath = path.join(PROJECT_ROOT, "cache", "codex-app-server-bin", path.basename(binaryPath));
+  try {
+    const sourceStat = fs.statSync(binaryPath);
+    let shouldCopy = true;
+    try {
+      const stagedStat = fs.statSync(stagedPath);
+      shouldCopy =
+        stagedStat.size !== sourceStat.size || Math.trunc(stagedStat.mtimeMs) !== Math.trunc(sourceStat.mtimeMs);
+    } catch {}
+    if (shouldCopy) {
+      fs.mkdirSync(path.dirname(stagedPath), { recursive: true });
+      fs.copyFileSync(binaryPath, stagedPath);
+      try {
+        fs.utimesSync(stagedPath, sourceStat.atime, sourceStat.mtime);
+      } catch {}
+      logger && logger.info(`[app-server] staged WindowsApps codex binary: ${stagedPath}`);
+    }
+    return stagedPath;
+  } catch (error) {
+    logger && logger.warn(`[app-server] failed to stage WindowsApps codex binary: ${binaryPath}`, error);
+    return binaryPath;
+  }
 }
 
 /** 从 CODEX_APP_SERVER_CMD 里推导 --listen endpoint，避免重复配置 URL。 */
@@ -171,8 +205,9 @@ function parsePositiveNumberEnv(name, fallback) {
 function createCodexAppServerClient({ broadcast, logger, defaultCodexBinaryPath } = {}) {
   const url = process.env.CODEX_APP_SERVER_URL || "";
   const defaultPort = String(process.env.CODEX_APP_SERVER_PORT || 3760);
+  const stagedCodexBinaryPath = stageWindowsCodexBinary(defaultCodexBinaryPath, logger);
   const defaultCmd = defaultCodexBinaryPath
-    ? `${shellQuote(defaultCodexBinaryPath)} app-server --listen stdio://`
+    ? `${shellQuote(stagedCodexBinaryPath)} app-server --listen stdio://`
     : `codex app-server --listen ws://127.0.0.1:${defaultPort}`;
   const cmd = process.env.CODEX_APP_SERVER_CMD || (url ? "" : defaultCmd);
   const transport = deriveTransport(url, cmd);

@@ -49,15 +49,17 @@ class AsarWebviewExtractor {
     let byteCount = 0;
 
     for (const rawEntry of entries) {
-      const entry = String(rawEntry).replace(/^\/+/, "");
+      const asarEntry = String(rawEntry).replace(/^[/\\]+/, "");
+      // Windows asar entries may use backslashes, so normalize before matching.
+      const entry = asarEntry.replace(/\\/g, "/");
       if (!entry.startsWith("webview/")) continue;
       const rel = entry.slice("webview/".length);
       if (!rel) continue;
 
-      const stat = this.archive.statFile(asarPath, entry);
+      const stat = this.archive.statFile(asarPath, asarEntry);
       if (stat && stat.files) continue;
 
-      const data = this.archive.extractFile(asarPath, entry);
+      const data = this.archive.extractFile(asarPath, asarEntry);
       const dest = this.pathGuard.resolve(webviewDestDir, rel);
       this.fileSystem.writeFile(dest, data);
       fileCount += 1;
