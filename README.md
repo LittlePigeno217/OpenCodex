@@ -222,7 +222,39 @@ curl http://127.0.0.1:3737/api/health
 | `CODEX_WEB_REPORTS_DIR` | `reports` | 指定诊断报告目录。 |
 | `CODEX_WEB_OFFICIAL_BUNDLE_DIR` | `cache/codex-official-bundle` | 指定官方 webview 解包缓存目录。 |
 | `CODEX_WEB_IPC_IMPL` | `electron-to-web` | 设为 `direct` 可使用 direct IPC 兜底实现。 |
+| `CODEX_WEB_BASE_PATH` | 空 | 网关对外暴露的 URL 前缀，例如 `/codex`。部署在子路径下时请设置它。 |
 
+
+`CODEX_WEB_BASE_PATH` 用于声明 gateway 对外暴露的 URL 前缀，例如 `/codex`。当你把 OpenCodex 部署在反向代理子路径下时，请设置它。
+
+## 反向代理
+
+如果你准备把 OpenCodex 挂在反向代理的子路径下，例如 `https://example.com/codex/`，可以这样启动 gateway：
+
+```bash
+CODEX_WEB_BASE_PATH=/codex HOST=127.0.0.1 PORT=3737 pnpm run web:dev
+```
+
+反代时请确保下面几点：
+
+- 浏览器访问前缀与 `CODEX_WEB_BASE_PATH` 一致，例如 `/codex`
+- WebSocket 升级要放行到 `/codex/ws`
+- 如果反代层保留前缀并转发到 gateway，上面的配置就足够
+- 如果反代层会先去掉 `/codex` 再转发，请额外传递 `X-Forwarded-Prefix: /codex`
+
+一个常见思路是：
+
+```text
+https://example.com/codex/   -> http://127.0.0.1:3737/codex/
+https://example.com/codex/ws -> ws://127.0.0.1:3737/codex/ws
+```
+
+如果你的代理会把 `/codex` 剥离后再转发，也可以改成：
+
+```text
+https://example.com/codex/ -> http://127.0.0.1:3737/
+X-Forwarded-Prefix: /codex
+```
 
 ## 文件/目录说明
 

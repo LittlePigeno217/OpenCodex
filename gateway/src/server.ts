@@ -58,6 +58,7 @@ const LAUNCHER_TOKEN = process.env.CODEX_WEB_LAUNCHER_TOKEN || "";
 const PASSWORD_HASH_PREFIX = "sha256-v1:";
 const AUTH_PASSWORD_HASH = loadAuthPasswordHashFromConfig();
 const COOKIE_NAME = "codex_web_auth";
+const CONFIGURED_BASE_PATH = normalizeBasePath(process.env.CODEX_WEB_BASE_PATH || "");
 const AUTH_TOKEN_TTL_MS = Math.max(
   1_000,
   Number(process.env.CODEX_WEB_AUTH_TOKEN_TTL_MS || 12 * 60 * 60 * 1000)
@@ -80,6 +81,56 @@ const TARGETED_CHANNELS = new Set([
   "codex-web:preview-file",
   "persisted-atom-sync",
 ]);
+
+function normalizeBasePath(value) {
+  const trimmed = String(value || "").trim();
+  if (!trimmed || trimmed === "/") return "";
+  const withLeadingSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  return withLeadingSlash.replace(/\/+$/, "");
+}
+
+function requestBasePathFromHeaders(headers) {
+  const forwardedPrefix = headerValue(headers, "x-forwarded-prefix");
+  if (typeof forwardedPrefix !== "string" || !forwardedPrefix.trim()) return "";
+  const [firstPrefix] = forwardedPrefix.split(",");
+  return normalizeBasePath(firstPrefix);
+}
+
+function resolveExternalBasePath(headers) {
+  return CONFIGURED_BASE_PATH || requestBasePathFromHeaders(headers);
+}
+
+function stripBasePath(pathname, basePath) {
+  if (!basePath) return pathname || "/";
+  if (pathname === basePath || pathname === `${basePath}/`) return "/";
+  if (pathname.startsWith(`${basePath}/`)) return pathname.slice(basePath.length) || "/";
+  return null;
+}
+
+function resolveGatewayRequestPath(pathname, headers) {
+  const externalBasePath = resolveExternalBasePath(headers);
+  return {
+    externalBasePath,
+    pathname: stripBasePath(pathname, externalBasePath) || pathname || "/",
+  };
+}
+
+function withBasePath(pathname, basePath = "") {
+  const normalizedPath = String(pathname || "").startsWith("/") ? String(pathname || "") : `/${String(pathname || "")}`;
+  if (!basePath) return normalizedPath;
+  return normalizedPath === "/" ? `${basePath}/` : `${basePath}${normalizedPath}`;
+}
+
+function requestIsSecure(req) {
+  const forwardedProto = headerValue(req.headers, "x-forwarded-proto");
+  if (typeof forwardedProto === "string" && forwardedProto.trim()) {
+    const [firstProto] = forwardedProto.split(",");
+    return String(firstProto || "")
+      .trim()
+      .toLowerCase() === "https";
+  }
+  return !!(req.socket && req.socket.encrypted);
+}
 
 /** 统一整理远端地址，后续可在这里接入设备验证/访问控制。 */
 function normalizeRemoteAddress(req) {
@@ -398,23 +449,32 @@ function isAuthed(req, url = null) {
   return authResultForRequest(req, url).authenticated;
 }
 
-function authCookieHeader(token) {
-  return `${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; Path=/; SameSite=Lax`;
+function authCookieHeader(token, options = {}) {
+  const basePath = normalizeBasePath(options.basePath);
+  const cookiePath = basePath || "/";
+  const secure = options.secure ? "; Secure" : "";
+  return `${COOKIE_NAME}=${encodeURIComponent(token)}; HttpOnly; Path=${cookiePath}; SameSite=Lax${secure}`;
 }
 
-function clearAuthCookieHeader() {
+function clearAuthCookieHeader(options = {}) {
   const expired = "Thu, 01 Jan 1970 00:00:00 GMT";
-  return [
-    `${COOKIE_NAME}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0; Expires=${expired}`,
-    `${COOKIE_NAME}=; Path=/; SameSite=Lax; Max-Age=0; Expires=${expired}`,
-    `${COOKIE_NAME}=; HttpOnly; Path=/api/auth; SameSite=Lax; Max-Age=0; Expires=${expired}`,
-    `${COOKIE_NAME}=; Path=/api/auth; SameSite=Lax; Max-Age=0; Expires=${expired}`,
-  ];
+  const basePath = normalizeBasePath(options.basePath);
+  const secure = options.secure ? "; Secure" : "";
+  const paths = new Set(["/", "/api/auth"]);
+  if (basePath) {
+    paths.add(basePath);
+    paths.add(`${basePath}/`);
+    paths.add(withBasePath("/api/auth", basePath));
+  }
+  return [...paths].flatMap((cookiePath) => [
+    `${COOKIE_NAME}=; HttpOnly; Path=${cookiePath}; SameSite=Lax; Max-Age=0; Expires=${expired}${secure}`,
+    `${COOKIE_NAME}=; Path=${cookiePath}; SameSite=Lax; Max-Age=0; Expires=${expired}${secure}`,
+  ]);
 }
 
-function authRefreshHeaders(auth) {
+function authRefreshHeaders(auth, options = {}) {
   if (!auth || !auth.authenticated || !auth.token || !auth.expiresAtMs) return {};
-  return { "set-cookie": authCookieHeader(auth.token, auth.expiresAtMs) };
+  return { "set-cookie": authCookieHeader(auth.token, options) };
 }
 
 /** 发送原始 HTTP 响应。 */
@@ -459,28 +519,33 @@ function readBody(req) {
 }
 
 /** 给官方 renderer HTML 注入 web-shell polyfill 和运行时配置。 */
-function transformOfficialHtml(rawHtml) {
+function transformOfficialHtml(rawHtml, basePath = "") {
   let html = rawHtml;
-  html = html.replace(/(src|href)=["']\/(?!official\/)([^"'#?]+)["']/g, '$1="/official/$2"');
-  html = html.replace(/(src|href)=["']\.\/([^"'#?]+)["']/g, '$1="/official/$2"');
+  html = html.replace(/(src|href)=["']\/(?!official\/)([^"'#?]+)["']/g, (_match, attribute, relPath) => {
+    return `${attribute}="${withBasePath(`/official/${relPath}`, basePath)}"`;
+  });
+  html = html.replace(/(src|href)=["']\.\/([^"'#?]+)["']/g, (_match, attribute, relPath) => {
+    return `${attribute}="${withBasePath(`/official/${relPath}`, basePath)}"`;
+  });
   const base = [
-    '<base href="/official/">',
-    '<script src="/codex-web-config.js"></script>',
-    '<script src="/codex-bridge-polyfill.js"></script>',
-    '<script src="/codex-tooltip-dismiss-guard.js"></script>',
+    `<base href="${withBasePath("/official/", basePath)}">`,
+    `<script src="${withBasePath("/codex-web-config.js", basePath)}"></script>`,
+    `<script src="${withBasePath("/codex-bridge-polyfill.js", basePath)}"></script>`,
+    `<script src="${withBasePath("/codex-tooltip-dismiss-guard.js", basePath)}"></script>`,
   ].join("\n    ");
   if (/<head[^>]*>/i.test(html)) {
     html = html.replace(/<head([^>]*)>/i, `<head$1>\n    ${base}`);
   }
-  return patchOfficialHtmlForWeb(html);
+  return patchOfficialHtmlForWeb(html, basePath);
 }
 
 /** 给少量运行时 patch 过的官方 chunk 换路径命名空间，绕开浏览器 immutable 缓存。 */
-function patchOfficialAssetUrls(rawHtml) {
+function patchOfficialAssetUrls(rawHtml, basePath = "") {
   return rawHtml
     .replace(
       /((?:src|href)=["']\/official\/assets\/[^"'?#]+\.js)(["'])/g,
-      (_match, prefix, quote) => `${prefix.replace("/official/assets/", "/official-patched/assets/")}${quote}`
+      (_match, prefix, quote) =>
+        `${prefix.replace("/official/assets/", withBasePath("/official-patched/assets/", basePath))}${quote}`
     );
 }
 
@@ -492,8 +557,8 @@ function patchOfficialCspForWeb(rawHtml) {
     .replace("'wasm-unsafe-eval'", "'wasm-unsafe-eval' 'unsafe-eval'");
 }
 
-function patchOfficialHtmlForWeb(rawHtml) {
-  return patchOfficialCspForWeb(patchOfficialAssetUrls(rawHtml));
+function patchOfficialHtmlForWeb(rawHtml, basePath = "") {
+  return patchOfficialCspForWeb(patchOfficialAssetUrls(rawHtml, basePath));
 }
 
 /** 查找 provider 准备好的官方 renderer 入口；运行链路不再依赖 CodexDesktop-Rebuild 的 src/ 快照。 */
@@ -512,7 +577,7 @@ function locateOfficialAsset(filePath) {
   return isWithinRoot(candidate, officialBundle.webviewDir) ? candidate : null;
 }
 
-function locateOfficialStyleAssetHref(prefix) {
+function locateOfficialStyleAssetHref(prefix, basePath = "") {
   if (!officialBundle || !officialBundle.webviewDir) return null;
   const assetsDir = path.join(officialBundle.webviewDir, "assets");
   if (!exists(assetsDir)) return null;
@@ -520,21 +585,25 @@ function locateOfficialStyleAssetHref(prefix) {
     .readdirSync(assetsDir)
     .filter((entry) => entry.startsWith(prefix) && entry.endsWith(".css"))
     .sort()[0];
-  return fileName ? `/official/assets/${fileName}` : null;
+  return fileName ? withBasePath(`/official/assets/${fileName}`, basePath) : null;
 }
 
-function officialStyleLinks() {
+function officialStyleLinks(basePath = "") {
   return ["app-main-", "app-shell-"]
-    .map(locateOfficialStyleAssetHref)
+    .map((prefix) => locateOfficialStyleAssetHref(prefix, basePath))
     .filter(Boolean)
     .map((href) => `<link rel="stylesheet" href="${href}" data-codex-official-style />`)
     .join("\n    ");
 }
 
-function createWebShellIndexResponse() {
+function createWebShellIndexResponse(basePath = "") {
   const shell = path.join(WEB_SHELL_DIR, "index.html");
   let html = readText(shell);
-  const links = officialStyleLinks();
+  const links = officialStyleLinks(basePath);
+  const baseHref = `<base href="${withBasePath("/", basePath)}">`;
+  if (/<head[^>]*>/i.test(html)) {
+    html = html.replace(/<head([^>]*)>/i, `<head$1>\n    ${baseHref}`);
+  }
   if (links) {
     if (html.includes("<!-- codex-official-styles -->")) {
       html = html.replace("<!-- codex-official-styles -->", links);
@@ -551,11 +620,11 @@ function isPublicOfficialAsset(reqPath) {
 }
 
 /** 读取并转换官方 renderer HTML，作为浏览器访问 Codex 的主页面。 */
-function createRendererResponse() {
+function createRendererResponse(basePath = "") {
   const located = locateOfficialIndex();
   if (!located) return null;
   const html = readText(located.file);
-  return transformOfficialHtml(html);
+  return transformOfficialHtml(html, basePath);
 }
 
 /** 判断是否应该回退到 SPA shell；刷新 /local/:id 这类官方前端路由时不能返回 404。 */
@@ -634,7 +703,7 @@ function readPasswordHashFromBody(rawBody, contentType) {
   return params.get("passwordHash") || "";
 }
 
-async function handleAuthLogin(req, res) {
+async function handleAuthLogin(req, res, basePath = "", secure = false) {
   if (req.method !== "POST") {
     return sendJson(res, 405, { ok: false, error: "Method Not Allowed" }, { "cache-control": "no-store" });
   }
@@ -677,12 +746,12 @@ async function handleAuthLogin(req, res) {
     },
     {
       "cache-control": "no-store",
-      "set-cookie": authCookieHeader(issued.token, issued.expiresAtMs),
+      "set-cookie": authCookieHeader(issued.token, { basePath, secure }),
     }
   );
 }
 
-function handleAuthStatus(req, res, url) {
+function handleAuthStatus(req, res, url, basePath = "", secure = false) {
   const auth = authResultForRequest(req, url);
   return sendJson(
     res,
@@ -694,11 +763,11 @@ function handleAuthStatus(req, res, url) {
       expiresAtMs: auth.expiresAtMs,
       ttlMs: AUTH_PASSWORD_HASH ? AUTH_TOKEN_TTL_MS : null,
     },
-    { "cache-control": "no-store", ...authRefreshHeaders(auth) }
+    { "cache-control": "no-store", ...authRefreshHeaders(auth, { basePath, secure }) }
   );
 }
 
-function handleAuthLogout(req, res, url) {
+function handleAuthLogout(req, res, url, basePath = "", secure = false) {
   const auth = authResultForRequest(req, url);
   if (auth.token) authStore.revoke(auth.token);
   return sendJson(
@@ -707,7 +776,7 @@ function handleAuthLogout(req, res, url) {
     { ok: true },
     {
       "cache-control": "no-store",
-      "set-cookie": clearAuthCookieHeader(),
+      "set-cookie": clearAuthCookieHeader({ basePath, secure }),
     }
   );
 }
@@ -737,12 +806,12 @@ function serveFile(res, file, status = 200, reqPath = "") {
   send(res, status, { "content-type": mimeType(file), "cache-control": cacheControlForRequestPath(reqPath) }, data);
 }
 
-function serveWebShellIndex(res) {
+function serveWebShellIndex(res, basePath = "") {
   send(
     res,
     200,
     { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" },
-    createWebShellIndexResponse()
+    createWebShellIndexResponse(basePath)
   );
 }
 
@@ -888,7 +957,8 @@ function createWsHub(server, getGatewayIpcPort) {
   // 只接受 /ws 升级，并校验 gateway 访问 token。浏览器 WebSocket 不能自定义 header，所以允许 query/cookie。
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url || "", `http://${req.headers.host || "localhost"}`);
-    if (url.pathname !== "/ws") return socket.destroy();
+    const { pathname } = resolveGatewayRequestPath(url.pathname, req.headers);
+    if (pathname !== "/ws") return socket.destroy();
     if (!isAuthed(req, url)) return socket.destroy();
     wss.handleUpgrade(req, socket, head, (ws) => {
       clients.add(ws);
@@ -956,6 +1026,7 @@ function buildGatewayStatus(appServer) {
       port: PORT,
       listenUrl,
       localUrl,
+      basePath: CONFIGURED_BASE_PATH,
       pid: process.pid,
       projectRoot: PROJECT_ROOT,
       webShellDir: WEB_SHELL_DIR,
@@ -999,7 +1070,7 @@ async function createGateway() {
    *
    * 浏览器拿到的是带 token 的 /api/local-file/... URL，不能直接读取本机任意路径。
    */
-  function createLocalFilePreview(filePath) {
+  function createLocalFilePreview(filePath, basePath = "") {
     const token = crypto.randomBytes(24).toString("base64url");
     const expiresAtMs = Date.now() + LOCAL_FILE_TOKEN_TTL_MS;
     localFileTokens.set(token, { filePath, expiresAtMs });
@@ -1008,7 +1079,7 @@ async function createGateway() {
       opened: true,
       path: filePath,
       name: path.basename(filePath),
-      url: `/api/local-file/${token}/${name}`,
+      url: withBasePath(`/api/local-file/${token}/${name}`, basePath),
       expiresAtMs,
     };
   }
@@ -1078,7 +1149,7 @@ async function createGateway() {
       }
       return true;
     },
-    openFile: (filePath) => createLocalFilePreview(filePath),
+    openFile: (filePath) => createLocalFilePreview(filePath, typeof ctx.basePath === "string" ? ctx.basePath : ""),
   });
 
   const codexIpcPort = new GatewayCodexIpcPort({
@@ -1101,12 +1172,13 @@ async function createGateway() {
   /** HTTP 请求主分发：静态页面、API、IPC invoke、文件预览都从这里进入。 */
   const requestHandler = async (req, res) => {
     const url = new URL(req.url, `http://${req.headers.host || "localhost"}`);
-    const pathname = url.pathname;
+    const secure = requestIsSecure(req);
+    const { externalBasePath, pathname } = resolveGatewayRequestPath(url.pathname, req.headers);
 
-    if (pathname === "/api/auth/status") return handleAuthStatus(req, res, url);
-    if (pathname === "/api/auth/login") return handleAuthLogin(req, res);
-    if (pathname === "/api/auth/logout") return handleAuthLogout(req, res, url);
-    if (pathname === "/login") return send(res, 302, { location: "/" }, "");
+    if (pathname === "/api/auth/status") return handleAuthStatus(req, res, url, externalBasePath, secure);
+    if (pathname === "/api/auth/login") return handleAuthLogin(req, res, externalBasePath, secure);
+    if (pathname === "/api/auth/logout") return handleAuthLogout(req, res, url, externalBasePath, secure);
+    if (pathname === "/login") return send(res, 302, { location: withBasePath("/", externalBasePath) }, "");
     if (pathname === "/api/launcher/status") {
       if (!isLauncherRequest(req)) {
         return sendJson(res, 401, { ok: false, error: "Unauthorized" }, { "cache-control": "no-store" });
@@ -1121,12 +1193,15 @@ async function createGateway() {
 
     if (isAppShellRoute(req, pathname)) {
       // index.html 是公开入口；真正 renderer、API、WS 都在通过 token 后才会返回。
-      return serveWebShellIndex(res);
+      return serveWebShellIndex(res, externalBasePath);
     }
 
     const requestAuthForRefresh = AUTH_PASSWORD_HASH ? authResultForRequest(req, url) : null;
     if (AUTH_PASSWORD_HASH && !requestAuthForRefresh.authenticated) return sendUnauthorized(req, res);
-    const requestAuthRefreshHeaders = authRefreshHeaders(requestAuthForRefresh);
+    const requestAuthRefreshHeaders = authRefreshHeaders(requestAuthForRefresh, {
+      basePath: externalBasePath,
+      secure,
+    });
     for (const [name, value] of Object.entries(requestAuthRefreshHeaders)) {
       res.setHeader(name, value);
     }
@@ -1144,9 +1219,17 @@ async function createGateway() {
           ...requestAuthRefreshHeaders,
         },
         `(() => {
+  const gatewayBasePath = ${JSON.stringify(externalBasePath)};
+  const gatewayBaseUrl = new URL(gatewayBasePath ? \`\${gatewayBasePath}/\` : "/", location.origin).href.replace(/\/$/, "");
+  const gatewayWsUrl = (() => {
+    const url = new URL(gatewayBasePath ? \`\${gatewayBasePath}/ws\` : "/ws", location.origin);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    return url.href;
+  })();
   window.__CODEX_WEB_CONFIG__ = {
-    gatewayBaseUrl: location.origin,
-    gatewayWsUrl: location.origin.replace(/^http/, "ws") + "/ws",
+    gatewayBasePath,
+    gatewayBaseUrl,
+    gatewayWsUrl,
     workspaceRoots: ${JSON.stringify(gatewayConfig.workspaceRoots)},
     homeDir: ${JSON.stringify(gatewayConfig.homeDir)},
     appServer: ${JSON.stringify(appServer.getMode())},
@@ -1180,7 +1263,7 @@ async function createGateway() {
       };
       try {
 	        const value = await requestContext.run(
-	          { clientId: "", remoteAddress: normalizeRemoteAddress(req) },
+	          { clientId: "", remoteAddress: normalizeRemoteAddress(req), basePath: externalBasePath },
 	          () => gatewayIpcPort.invokeGatewayIpc("list-models-for-host", params, { remoteAddress: normalizeRemoteAddress(req) })
 	        );
         return sendJson(res, 200, value, { "cache-control": "no-store" });
@@ -1233,7 +1316,7 @@ async function createGateway() {
       const contentType = String(headerValue(req.headers, "content-type") || "");
       try {
 	        const value = await requestContext.run(
-	          { clientId: "", remoteAddress: normalizeRemoteAddress(req) },
+	          { clientId: "", remoteAddress: normalizeRemoteAddress(req), basePath: externalBasePath },
 	          () =>
 	            gatewayIpcPort.invokeGatewayIpc("transcribe", {
 	              bodyBase64: isBase64 ? rawBody : Buffer.from(rawBody, "utf8").toString("base64"),
@@ -1273,7 +1356,7 @@ async function createGateway() {
       const startedAtMs = Date.now();
       try {
         // requestContext.run 会把当前 clientId 绑定到后续深层调用，定向广播靠它兜底。
-	        const value = await requestContext.run({ clientId, remoteAddress }, () =>
+	        const value = await requestContext.run({ clientId, remoteAddress, basePath: externalBasePath }, () =>
 	          gatewayIpcPort.invokeGatewayIpc(channel, payload, {
 	            clientId,
 	            remoteAddress,
@@ -1284,7 +1367,7 @@ async function createGateway() {
               }
               return true;
             },
-            openFile: (filePath) => createLocalFilePreview(filePath),
+            openFile: (filePath) => createLocalFilePreview(filePath, externalBasePath),
           })
         );
         const elapsedMs = Date.now() - startedAtMs;
@@ -1320,7 +1403,7 @@ async function createGateway() {
 
     if (pathname === "/official-index.patched.html") {
       await ensureAppServerStarted();
-      const html = createRendererResponse();
+      const html = createRendererResponse(externalBasePath);
       if (!html) {
         return send(res, 404, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" }, "Official renderer bundle is not available yet.");
       }
@@ -1332,7 +1415,7 @@ async function createGateway() {
 
     if (isAppShellRoute(req, pathname)) {
       // 所有无扩展名前端路由都走同一个 bootstrap，让官方 router 接管 /local、/remote 等路径。
-      return serveWebShellIndex(res);
+      return serveWebShellIndex(res, externalBasePath);
     }
 
     send(res, 404, { "content-type": "text/plain; charset=utf-8" }, "Not Found");

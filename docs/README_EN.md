@@ -149,6 +149,36 @@ Use Tailscale, ZeroTier, a company VPN, or a similar private network solution fo
 | `CODEX_DESKTOP_APP_PATH` | auto scan | Explicit path to the Codex Desktop app or its `app.asar`. |
 | `CODEX_WEB_OFFICIAL_BUNDLE_DIR` | `cache/official-bundle` | Cache directory for extracted official webview assets. |
 | `CODEX_WEB_IPC_IMPL` | `electron-to-web` | Set to `direct` to use the direct IPC fallback implementation. |
+| `CODEX_WEB_BASE_PATH` | empty | External URL prefix for the gateway, for example `/codex`. Set this when serving OpenCodex from a subpath. |
+
+## Reverse Proxy
+
+If you want to publish OpenCodex behind a reverse proxy subpath such as `https://example.com/codex/`, start the gateway like this:
+
+```bash
+CODEX_WEB_BASE_PATH=/codex HOST=127.0.0.1 PORT=3737 pnpm run web:dev
+```
+
+Make sure your proxy setup keeps these behaviors:
+
+- The browser-facing prefix matches `CODEX_WEB_BASE_PATH`, such as `/codex`
+- WebSocket upgrades are forwarded for `/codex/ws`
+- If the proxy preserves the prefix when forwarding upstream, the setting above is enough
+- If the proxy strips `/codex` before forwarding, also send `X-Forwarded-Prefix: /codex`
+
+Typical layouts:
+
+```text
+https://example.com/codex/   -> http://127.0.0.1:3737/codex/
+https://example.com/codex/ws -> ws://127.0.0.1:3737/codex/ws
+```
+
+If your proxy removes the prefix before forwarding, you can instead use:
+
+```text
+https://example.com/codex/ -> http://127.0.0.1:3737/
+X-Forwarded-Prefix: /codex
+```
 
 ## Files / Directories
 

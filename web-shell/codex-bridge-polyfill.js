@@ -2,11 +2,45 @@
   const w = window;
   if (w.__codexBridgePolyfillInstalled) return;
   w.__codexBridgePolyfillInstalled = true;
-  const cfg = (w.__CODEX_WEB_CONFIG__ =
-    w.__CODEX_WEB_CONFIG__ || {
-      gatewayBaseUrl: location.origin,
-      gatewayWsUrl: location.origin.replace(/^http/, "ws") + "/ws",
-    });
+  function normalizeGatewayBasePath(value) {
+    const trimmed = String(value || "").trim();
+    if (!trimmed || trimmed === "/") return "";
+    const withLeadingSlash = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+    return withLeadingSlash.replace(/\/+$/, "");
+  }
+
+  function defaultGatewayBaseUrl(basePath) {
+    return new URL(basePath ? `${basePath}/` : "/", location.origin).href.replace(/\/$/, "");
+  }
+
+  function defaultGatewayWsUrl(basePath) {
+    const url = new URL(basePath ? `${basePath}/ws` : "/ws", location.origin);
+    url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+    return url.href;
+  }
+
+  function isAbsoluteGatewayUrl(value) {
+    const rawValue = String(value || "");
+    return /^[a-z][a-z\d+\-.]*:/i.test(rawValue) || rawValue.startsWith("//");
+  }
+
+  const cfg = (w.__CODEX_WEB_CONFIG__ = w.__CODEX_WEB_CONFIG__ || {});
+  cfg.gatewayBasePath = normalizeGatewayBasePath(cfg.gatewayBasePath);
+  cfg.gatewayBaseUrl =
+    typeof cfg.gatewayBaseUrl === "string" && cfg.gatewayBaseUrl
+      ? String(cfg.gatewayBaseUrl).replace(/\/+$/, "")
+      : defaultGatewayBaseUrl(cfg.gatewayBasePath);
+  cfg.gatewayWsUrl =
+    typeof cfg.gatewayWsUrl === "string" && cfg.gatewayWsUrl
+      ? String(cfg.gatewayWsUrl)
+      : defaultGatewayWsUrl(cfg.gatewayBasePath);
+
+  function gatewayUrl(path) {
+    const rawPath = String(path || "").trim();
+    if (!rawPath) return `${cfg.gatewayBaseUrl}/`;
+    const normalizedPath = isAbsoluteGatewayUrl(rawPath) ? rawPath : rawPath.replace(/^\/+/, "");
+    return new URL(normalizedPath, `${cfg.gatewayBaseUrl}/`).href;
+  }
   const AUTH_FORCE_LOGIN_STORAGE_KEY = "codex_web_force_login";
   const OPENCODEX_SETTINGS_STORAGE_KEY = "opencodex_web_settings_v1";
   const GATEWAY_AUTH_LOGOUT_LABEL = "退出认证";
@@ -459,7 +493,7 @@
     w.__codexGatewayAuthLogoutInProgress = true;
     markGatewayAuthLogoutBusy(item, true);
     try {
-      const res = await w.fetch("/api/auth/logout", {
+      const res = await w.fetch(gatewayUrl("api/auth/logout"), {
         method: "POST",
         cache: "no-store",
         credentials: "same-origin",
@@ -467,7 +501,7 @@
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       forceGatewayLoginOnNextBoot();
-      w.location.replace("/");
+      w.location.replace(gatewayUrl(""));
     } catch (error) {
       w.__codexGatewayAuthLogoutInProgress = false;
       markGatewayAuthLogoutBusy(item, false);
@@ -850,7 +884,7 @@
     search.set("includeHidden", normalized.includeHidden ? "1" : "0");
     search.set("cursor", normalized.cursor == null ? "" : normalized.cursor);
     search.set("limit", String(normalized.limit));
-    const promise = fetch(`/api/models/list-for-host?${search.toString()}`, {
+    const promise = fetch(gatewayUrl(`api/models/list-for-host?${search.toString()}`), {
       credentials: "same-origin",
       headers: gatewayAuthHeaders({ accept: "application/json" }),
     })
@@ -1470,7 +1504,7 @@
     for (let attempt = 0; attempt < retryDelays.length; attempt += 1) {
       if (retryDelays[attempt] > 0) await delay(retryDelays[attempt]);
       try {
-        res = await w.fetch("/api/ipc/invoke", {
+        res = await w.fetch(gatewayUrl("api/ipc/invoke"), {
           method: "POST",
           credentials: "same-origin",
           headers: gatewayAuthHeaders({ "content-type": "application/json" }),
@@ -1574,7 +1608,7 @@
   function normalizePreviewUrl(url) {
     if (typeof url !== "string" || !url) return null;
     try {
-      return new URL(url, location.origin).href;
+      return gatewayUrl(url);
     } catch {
       return null;
     }
@@ -1615,7 +1649,7 @@
         .filter((part, index) => index === 0 || part.length > 0)
         .map((part) => encodeURIComponent(part))
         .join("/");
-      return new URL(`/api/app-fs/@fs/${encodedPath}`, location.origin).href;
+      return gatewayUrl(`api/app-fs/@fs/${encodedPath}`);
     } catch {
       return null;
     }

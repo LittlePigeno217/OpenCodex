@@ -526,6 +526,11 @@
           } catch {}
         }
 
+        function gatewayUrl(path) {
+          const normalizedPath = String(path || "").replace(/^\/+/, "");
+          return new URL(normalizedPath, document.baseURI).href;
+        }
+
         function authHeaders(extra) {
           const headers = new Headers(extra || {});
           const token = storedToken();
@@ -566,7 +571,7 @@
         }
 
         async function authStatus() {
-          const res = await fetch("/api/auth/status", {
+          const res = await fetch(gatewayUrl("api/auth/status"), {
             cache: "no-store",
             credentials: "same-origin",
             headers: authHeaders({ accept: "application/json" }),
@@ -577,7 +582,7 @@
 
         async function bootRenderer() {
           showBoot("正在启动 OpenCodex...");
-          const res = await fetch("/official-index.patched.html", {
+          const res = await fetch(gatewayUrl("official-index.patched.html"), {
             cache: "no-store",
             credentials: "same-origin",
             headers: authHeaders({ accept: "text/html" }),
@@ -708,7 +713,7 @@
 
         async function login(password) {
           const passwordHash = await sha256Hex(password);
-          const res = await fetch("/api/auth/login", {
+          const res = await fetch(gatewayUrl("api/auth/login"), {
             method: "POST",
             cache: "no-store",
             credentials: "same-origin",
